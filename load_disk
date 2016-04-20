@@ -1,0 +1,126 @@
+#!/usr/bin/perl
+use strict;
+use DBI;
+
+my $sql_statement;
+my $sth;
+my $rv;
+
+if ($#ARGV != 1) {
+    &usage();
+}
+
+my $dbfile = $ARGV[0];
+
+die "File $dbfile does not exist" if (! -f $dbfile);
+
+my $type = `file $dbfile`;
+chomp($type);
+
+die "File $dbfile is not a valid database" if ($type ne "$dbfile: SQLite 3.x database");
+
+my $dsn = "dbi:SQLite:dbname=$dbfile";
+
+my $userid = "";
+my $password = "";
+
+my $dbh = DBI->connect($dsn, $userid, $password, { RaiseError => 1 })
+                      or die $DBI::errstr;
+# print "Opened database successfully\n";
+
+# First get Id Counter
+$sql_statement = qq(SELECT Count FROM IdCounters WHERE IdFieldname='Volumes.VolumeID');
+$sth = $dbh->prepare($sql_statement);
+$rv = $sth->execute() or die $DBI::errstr;
+my @row = $sth->fetchrow_array();
+
+my $volume_id = $row[0];
+$volume_id++;
+
+print "Loading Volume ID $volume_id\n";
+
+
+
+
+
+exit(0);
+
+my %titles = ();
+my %ids = ();
+
+$sql_statement = qq(SELECT VolumeID, Title from Volumes;);
+$sth = $dbh->prepare( $sql_statement );
+$rv = $sth->execute() or die $DBI::errstr;
+
+while(my @row = $sth->fetchrow_array()) {
+	my $id = $row[0];
+	my $title = $row[1];
+
+	my $temp = 'MP3-'.sprintf("%03d", $id);
+
+#	print "ID=$id Title=$title\n" if ($temp ne $title);
+	if ($temp ne $title) {
+		$titles{$id} = $title;
+		$ids{$title} = $id;
+	}
+}
+
+foreach my $id (keys %titles) {
+	print "Acomodando entradas en el volumen $titles{$id}\n";
+
+
+#	my $sql_statement = qq(SELECT VolumeID, ItemID, Name from Items WHERE VolumeID=$id;);
+#	my $sth = $dbh->prepare($sql_statement);
+#	my $rv = $sth->execute() or die $DBI::errstr;
+#	print $DBI::errstr if($rv < 0);
+#
+#	while(my @row = $sth->fetchrow_array()) {
+#		print "$row[0] $row[1] $row[2]\n";
+#	}
+
+	# Libero el VID que estoy analizando
+	my $sql_statement = qq(UPDATE Items SET VolumeID = 999 WHERE VolumeID=$id;);
+	print "SQL: $sql_statement\n";
+	my $sth = $dbh->prepare($sql_statement);
+#	my $rv = $sth->execute() or die $DBI::errstr;
+#	print $DBI::errstr if($rv < 0);
+
+	# Obtengo el VID que debo actualizar:
+	print "ID a actualizar: $ids{$titles{$id}}\n";
+
+
+#	my $sql_statement = qq(UPDATE Items SET VolumeID = 999 WHERE VolumeID=$id;);
+#	print "SQL: $sql_statement\n";
+#	my $sth = $dbh->prepare($sql_statement);
+#	my $rv = $sth->execute() or die $DBI::errstr;
+#	print $DBI::errstr if($rv < 0);
+
+	
+
+
+
+exit(0);
+	
+}
+
+$dbh->disconnect();
+
+
+sub usage
+{
+
+        print <<END;
+
+Usage:
+
+        $0 database directory
+
+Ex:
+        $0 Music.vdb /dvd
+
+        Add /dvd directory content to Music.vdb database
+
+END
+        exit(0);
+}
+
