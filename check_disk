@@ -10,7 +10,7 @@ use Date::Format;
 use utf8;
 use Text::Unidecode qw( unidecode );
 
-my $sizeDifferenceLimit = 6;
+my $sizeDifferenceLimit = 7;
 
 my $sql_statement;
 my $sth;
@@ -40,11 +40,11 @@ my $password = "";
 
 my $dbh = DBI->connect($dsn, $userid, $password, { RaiseError => 1 })
                       or die $DBI::errstr;
-print "Opened database successfully\n";
+#print "Opened database successfully\n";
 $dbh->{sqlite_unicode} = 1;
 
 
-print "Searching for label $label\n";
+#print "Searching for label $label\n";
 $sth = $dbh->prepare("SELECT VolumeID FROM Volumes WHERE Title = ?");
 $sth->execute($label) or die $DBI::errstr;
 
@@ -55,11 +55,11 @@ while (my @row = $sth->fetchrow_array()) {
 }
 
 if (! $found) {
-    print "Volume not found\n";
+    print "Volume $label not found\n";
     exit(0);
 }
 
-print "Volume ID $volumeId\n";
+# print "Volume ID $volumeId\n";
 
 
 # my $start = shift || '.';
@@ -88,7 +88,8 @@ for my $obj (File::Find::Rule->in($start)) {
         $find{$path}{'mime'} = 'x-directory/normal';
         next;
     }
-    $path =~ s/[^a-zA-Z0-9\/\.\(\)\[\]\_\-\,\'\&\s\@\!\#\$]/  /g;
+    $path =~ s/[^a-zA-Z0-9\/\.\(\)\[\]\_\-\,\'\&\s\@\!\#\$\%\+\=\{\}\`\~]/  /g;
+    $path =~ s/[\`\~]/ /g;
 
     my $location = dirname($path);
     my $filename = basename($path);
@@ -132,12 +133,6 @@ for my $obj (File::Find::Rule->in($start)) {
 }
 
 
-
-#####ItemID                  INTEGER,      (elemento dentro del disco: archivos y directorios)
-#####ParentID                INTEGER     (de qué elemento cuelga)
-
-
-my %items = ();
 $sql_statement = qq(SELECT ItemID,ParentID,ItemType,Name,MimeType,MetaData,Note,IsContainer,Location,LastWriteTime,Size FROM Items WHERE VolumeID = ? ORDER BY ItemID);
 $sth = $dbh->prepare($sql_statement);
 $sth->execute($volumeId) or die $DBI::errstr;
@@ -169,48 +164,56 @@ while (my @row = $sth->fetchrow_array()) {
         print "Can't find $path on disk\n";
     } else {
         if ($itemType ne $find{$path}{'itemType'}) {
-            print "No coincide $itemType en la base con $find{$path}{'itemType'}\n";
-            goto RET;
+            print "Itemtype: No coincide $itemType en la base con $find{$path}{'itemType'} para $path\n";
+            goto NEXT;;
         }
 
         if ($filename ne $find{$path}{'filename'}) {
             print "No coincide $filename en la base con $find{$path}{'filename'}\n";
-            goto RET;
+            goto NEXT;;
         }
 
         if ($container ne $find{$path}{'container'}) {
             print "No coincide $container en la base con $find{$path}{'container'}\n";
-            goto RET;
+            goto NEXT;;
         }
 
         if ($location ne $find{$path}{'location'}) {
             print "No coincide $location en la base con $find{$path}{'location'}\n";
-            goto RET;
+            goto NEXT;;
         }
 
         # There's a differencia of a few bytes
         if ($container == 0) {
             if ((abs($size - $find{$path}{'size'})) > $sizeDifferenceLimit) {
                 print "No coincide $size en la base con $find{$path}{'size'} para $path\n";
-                goto RET;
+                goto NEXT;;
             }
         }
         # There's a difference with saved date
 #        print "No coincide $mtime en la base con $find{$path}{'mtime'} para $path\n" if ($mtime ne $find{$path}{'mtime'});
 
-        if ($mime ne $find{$path}{'mime'}) {
-            print "No coincide $mime en la base con $find{$path}{'mime'} para $path\n";
-            goto RET;
+        if (
+            ($mime ne 'application/octet-stream') &&
+            ($mime ne 'application/x-core') &&
+            ($mime ne 'video/x-ms-asf') &&
+            ($mime ne 'text/x-install')
+                ) {
+            if ($mime ne $find{$path}{'mime'}) {
+                print "No coincide $mime en la base con $find{$path}{'mime'} para $path\n";
+                goto NEXT;;
+            }
         }
 
         if ($metadata ne $find{$path}{'metadata'}) {
             print "No coincide $metadata en la base con $find{$path}{'metadata'} para $path\n";
-            goto RET;
+            goto NEXT;;
         }
+       
 
         if ($note ne $find{$path}{'note'}) {
             print "No coincide $note en la base con $find{$path}{'note'} para $path\n";
-            goto RET;
+            goto NEXT;;
         }
 
 #        print "Path: $path ItemId: $itemId ParentId: $parentId Location: $location LocationItemId: $find{$location}{'itemId'}\n";
