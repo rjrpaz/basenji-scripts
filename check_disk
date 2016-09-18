@@ -1,0 +1,261 @@
+#!/usr/bin/perl
+use strict;
+use DBI;
+use File::Find::Rule;
+use File::MimeInfo;
+use File::Basename;
+use File::stat;
+use Fcntl ':mode';
+use Date::Format;
+use utf8;
+use Text::Unidecode qw( unidecode );
+
+my $sizeDifferenceLimit = 6;
+
+my $sql_statement;
+my $sth;
+my $rv;
+my %parent_id = ();
+
+if ($#ARGV != 2) {
+    &usage();
+}
+
+my $dbfile = $ARGV[0];
+my $directory = $ARGV[1];
+my $label = $ARGV[2];
+my $volumeId = '';
+
+die "File $dbfile does not exist" if (! -f $dbfile);
+
+my $type = `file $dbfile`;
+chomp($type);
+
+die "File $dbfile is not a valid database" if ($type ne "$dbfile: SQLite 3.x database");
+
+my $dsn = "dbi:SQLite:dbname=$dbfile";
+
+my $userid = "";
+my $password = "";
+
+my $dbh = DBI->connect($dsn, $userid, $password, { RaiseError => 1 })
+                      or die $DBI::errstr;
+print "Opened database successfully\n";
+$dbh->{sqlite_unicode} = 1;
+
+
+print "Searching for label $label\n";
+$sth = $dbh->prepare("SELECT VolumeID FROM Volumes WHERE Title = ?");
+$sth->execute($label) or die $DBI::errstr;
+
+my $found = 0;
+while (my @row = $sth->fetchrow_array()) {
+    $found = 1;
+    $volumeId = $row[0];
+}
+
+if (! $found) {
+    print "Volume not found\n";
+    exit(0);
+}
+
+print "Volume ID $volumeId\n";
+
+
+# my $start = shift || '.';
+chop($directory) if ($directory =~ /\/$/);
+my $start = $directory;
+
+my $id = 1;
+
+my %find = ();
+
+for my $obj (File::Find::Rule->in($start)) {
+#    next if ($obj eq $start);
+
+    my $stat = stat($obj);
+    my $mime = mimetype($obj);
+    $mime =~ s/inode\/directory/x-directory\/normal/g;
+
+    (my $path) = ($obj =~ /^$directory(.*)/);
+    if ($obj eq $start) {
+        $path = '/';
+        $find{$path}{'filename'} = '/';
+        $find{$path}{'parentId'} = 0;
+        $find{$path}{'itemType'} = 0;
+        $find{$path}{'container'} = 1;
+        $find{$path}{'location'} = '';
+        $find{$path}{'mime'} = 'x-directory/normal';
+        next;
+    }
+    $path =~ s/[^a-zA-Z0-9\/\.\(\)\[\]\_\-\,\'\&\s\@\!\#\$]/  /g;
+
+    my $location = dirname($path);
+    my $filename = basename($path);
+
+    if ($filename eq '') {
+        $filename = '/';
+        $parent_id{$filename} = 0;
+    }
+
+    my $container = 0;
+    if (S_ISDIR($stat->mode)) {
+        $container = 1;
+    }
+
+    if ($container) {
+        $find{$path}{'itemType'} = 0;
+    } else {
+        $find{$path}{'itemType'} = 1;
+    }
+    $find{$path}{'filename'} = $filename;
+    $find{$path}{'mime'} = $mime;
+    $find{$path}{'container'} = $container;
+    $find{$path}{'location'} = $location;
+    $find{$path}{'size'} = $stat->size;
+    $find{$path}{'mtime'} = time2str("%Y-%m-%d %H:%M:%S", $stat->mtime);
+    $find{$path}{'note'} = '';
+
+#####VolumeID                INTEGER,   (a qué disco pertenece)
+#####ItemID                  INTEGER,      (elemento dentro del disco: archivos y directorios)
+#####ParentID                INTEGER     (de qué elemento cuelga)
+#####ItemType                INTEGER    (0=directorio, 1=archivo)
+#####Name                    VARCHAR(256)    (Nombre del archivo)
+#####MimeType                VARCHAR(64),   (Tipo de mime)
+#MetaData                TEXT,    (NULL)    (Metadata del archivo, si hay)
+#Note                    TEXT,    (Info adicional, como características del mp3 pe)
+#####IsContainer             BOOLEAN     (1=si es directorio, 0= si es archivo)
+#####Location                VARCHAR(4096),   (Path al archivo. Es "/" si está en el 1er nivel)
+#####LastWriteTime   DATE,    (Fecha de modificación del archivo)
+#####Size                    INTEGER,    (Tamaño del archivo)
+
+}
+
+
+
+#####ItemID                  INTEGER,      (elemento dentro del disco: archivos y directorios)
+#####ParentID                INTEGER     (de qué elemento cuelga)
+
+
+my %items = ();
+$sql_statement = qq(SELECT ItemID,ParentID,ItemType,Name,MimeType,MetaData,Note,IsContainer,Location,LastWriteTime,Size FROM Items WHERE VolumeID = ? ORDER BY ItemID);
+$sth = $dbh->prepare($sql_statement);
+$sth->execute($volumeId) or die $DBI::errstr;
+while (my @row = $sth->fetchrow_array()) {
+    my $itemId = $row[0];
+    my $parentId = $row[1];
+    my $itemType = $row[2];
+    my $filename = $row[3];
+    my $mime = $row[4];
+    my $metadata = $row[5];
+    my $note = $row[6];
+    my $container = $row[7];
+    my $location = $row[8];
+    my $mtime = $row[9];
+    my $size = $row[10];
+
+    my $path = '/';
+
+    if ($location eq '/') {
+        $path = $location.$filename;
+    } else {
+        $path = join('/', $location, $filename) if ($filename ne '/');
+    }
+
+    $find{$path}{'finded'} = 0;
+    $find{$path}{'itemId'} = $itemId;
+
+    if (! defined($find{$path})) {
+        print "Can't find $path on disk\n";
+    } else {
+        if ($itemType ne $find{$path}{'itemType'}) {
+            print "No coincide $itemType en la base con $find{$path}{'itemType'}\n";
+            goto RET;
+        }
+
+        if ($filename ne $find{$path}{'filename'}) {
+            print "No coincide $filename en la base con $find{$path}{'filename'}\n";
+            goto RET;
+        }
+
+        if ($container ne $find{$path}{'container'}) {
+            print "No coincide $container en la base con $find{$path}{'container'}\n";
+            goto RET;
+        }
+
+        if ($location ne $find{$path}{'location'}) {
+            print "No coincide $location en la base con $find{$path}{'location'}\n";
+            goto RET;
+        }
+
+        # There's a differencia of a few bytes
+        if ($container == 0) {
+            if ((abs($size - $find{$path}{'size'})) > $sizeDifferenceLimit) {
+                print "No coincide $size en la base con $find{$path}{'size'} para $path\n";
+                goto RET;
+            }
+        }
+        # There's a difference with saved date
+#        print "No coincide $mtime en la base con $find{$path}{'mtime'} para $path\n" if ($mtime ne $find{$path}{'mtime'});
+
+        if ($mime ne $find{$path}{'mime'}) {
+            print "No coincide $mime en la base con $find{$path}{'mime'} para $path\n";
+            goto RET;
+        }
+
+        if ($metadata ne $find{$path}{'metadata'}) {
+            print "No coincide $metadata en la base con $find{$path}{'metadata'} para $path\n";
+            goto RET;
+        }
+
+        if ($note ne $find{$path}{'note'}) {
+            print "No coincide $note en la base con $find{$path}{'note'} para $path\n";
+            goto RET;
+        }
+
+#        print "Path: $path ItemId: $itemId ParentId: $parentId Location: $location LocationItemId: $find{$location}{'itemId'}\n";
+        if ($location ne '') {
+            if ($parentId ne $find{$location}{'itemId'}) {
+                print "No coincide $parentId en la base con $find{$location}{'itemId'} para $path\n";
+            }
+        }
+
+#        delete($find{$path});
+        $find{$path}{'finded'} = 1;
+
+NEXT:
+    }
+
+#    $items{$path}{'location'} = $location;
+#    $items{$path}{'filename'} = $name;
+#    $items{$path}{'container'} = $location;
+}
+
+
+foreach my $key (keys %find) {
+    next if ($find{$key}{'finded'} == 1);
+    print "K: $key\n";
+}
+
+$dbh->disconnect();
+exit(0);
+
+
+sub usage
+{
+
+        print <<END;
+
+Usage:
+
+        $0 database directory label
+
+Ex:
+        $0 Music.vdb /dvd "MP3-001"
+
+        Check disk information of /dvd agains volume identified as "MP3-001"
+
+END
+        exit(0);
+}
+
