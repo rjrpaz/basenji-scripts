@@ -156,34 +156,11 @@ $sql_statement = qq(UPDATE IdCounters SET Count=? WHERE IdFieldname = 'Volumes.V
 $sth = $dbh->prepare($sql_statement);
 $sth->execute($volumeId) or die $DBI::errstr;
 
+$dbh->disconnect();
 
 $command = "basenji -d=".$dbfile;
 print "$command\n";
 system($command);
-
-exit(0);
-
-my %titles = ();
-my %ids = ();
-
-$sql_statement = qq(SELECT VolumeID, Title from Volumes;);
-$sth = $dbh->prepare( $sql_statement );
-$rv = $sth->execute() or die $DBI::errstr;
-
-while(my @row = $sth->fetchrow_array()) {
-	my $id = $row[0];
-	my $title = $row[1];
-
-	my $temp = 'MP3-'.sprintf("%03d", $id);
-
-#	print "ID=$id Title=$title\n" if ($temp ne $title);
-	if ($temp ne $title) {
-		$titles{$id} = $title;
-		$ids{$title} = $id;
-	}
-}
-
-$dbh->disconnect();
 
 exit(0);
 
