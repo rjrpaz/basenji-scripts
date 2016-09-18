@@ -61,8 +61,6 @@ if (! $found) {
 
 # print "Volume ID $volumeId\n";
 
-
-# my $start = shift || '.';
 chop($directory) if ($directory =~ /\/$/);
 my $start = $directory;
 

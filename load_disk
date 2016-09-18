@@ -1,23 +1,45 @@
 #!/usr/bin/perl
 use strict;
 use DBI;
+use File::Find::Rule;
+use File::MimeInfo;
+use File::Basename;
+use File::stat;
+use Tie::IxHash;
+use Fcntl ':mode';
+use Date::Format;
+use utf8;
+use Text::Unidecode qw( unidecode );
 
 my $sql_statement;
 my $sth;
 my $rv;
+my %parent_id = ();
 
-if ($#ARGV != 1) {
+if ($#ARGV != 2) {
     &usage();
 }
 
 my $dbfile = $ARGV[0];
+my $directory = $ARGV[1];
+my $label = $ARGV[2];
+
+if ($dbfile !~ /^\//) {
+    my $pwd = `pwd`;
+    chomp($pwd);
+    $dbfile = join('/', $pwd, $dbfile);
+}
 
 die "File $dbfile does not exist" if (! -f $dbfile);
 
 my $type = `file $dbfile`;
 chomp($type);
 
-die "File $dbfile is not a valid database" if ($type ne "$dbfile: SQLite 3.x database");
+die "File $dbfile is not a valid database" if ($type !~ /$dbfile: SQLite ..x database/);
+
+# Database backup
+my $command = "cp $dbfile /tmp/".basename($dbfile);
+system($command);
 
 my $dsn = "dbi:SQLite:dbname=$dbfile";
 
@@ -26,6 +48,7 @@ my $password = "";
 
 my $dbh = DBI->connect($dsn, $userid, $password, { RaiseError => 1 })
                       or die $DBI::errstr;
+$dbh->{sqlite_unicode} = 1;
 # print "Opened database successfully\n";
 
 # First get Id Counter
@@ -34,14 +57,109 @@ $sth = $dbh->prepare($sql_statement);
 $rv = $sth->execute() or die $DBI::errstr;
 my @row = $sth->fetchrow_array();
 
-my $volume_id = $row[0];
-$volume_id++;
+my $volumeId = $row[0];
+$volumeId++;
 
-print "Loading Volume ID $volume_id\n";
+print "Loading Volume ID $volumeId\n";
+
+chop($directory) if ($directory =~ /\/$/);
+my $start = $directory;
+
+my %find = ();
+tie %find, "Tie::IxHash";
+
+for my $obj (File::Find::Rule->in($start)) {
+#    next if ($obj eq $start);
+
+    my $stat = stat($obj);
+    my $mime = mimetype($obj);
+    $mime =~ s/inode\/directory/x-directory\/normal/g;
+
+    (my $path) = ($obj =~ /^$directory(.*)/);
+    if ($obj eq $start) {
+        $path = '/';
+        $find{$path}{'filename'} = '/';
+        $find{$path}{'parentId'} = 0;
+        $find{$path}{'itemType'} = 0;
+        $find{$path}{'container'} = 1;
+        $find{$path}{'location'} = '';
+        $find{$path}{'mime'} = 'x-directory/normal';
+        $find{$path}{'mtime'} = time2str("%Y-%m-%d %H:%M:%S", $stat->mtime);
+        $find{$path}{'size'} = $stat->size;
+        next;
+    }
+    $path =~ s/[^a-zA-Z0-9\/\.\(\)\[\]\_\-\,\'\&\s\@\!\#\$\%\+\=\{\}\`\~]/  /g;
+    $path =~ s/[\`\~]/ /g;
+
+    my $location = dirname($path);
+    my $filename = basename($path);
+
+    if ($filename eq '') {
+        $filename = '/';
+        $parent_id{$filename} = 0;
+    }
+
+    my $container = 0;
+    if (S_ISDIR($stat->mode)) {
+        $container = 1;
+    }
+
+    if ($container) {
+        $find{$path}{'itemType'} = 0;
+    } else {
+        $find{$path}{'itemType'} = 1;
+    }
+    $find{$path}{'filename'} = $filename;
+    $find{$path}{'mime'} = $mime;
+    $find{$path}{'container'} = $container;
+    $find{$path}{'location'} = $location;
+    $find{$path}{'size'} = $stat->size;
+    $find{$path}{'mtime'} = time2str("%Y-%m-%d %H:%M:%S", $stat->mtime);
+    $find{$path}{'note'} = '';
+}
 
 
+my $id = 1;
+my $nroFiles = 0;
+my $nroDirs = 0;
+my $totalSize = 0;
+foreach my $path (keys %find) {
+    $find{$path}{'id'} = $id;
+
+    my $location = $find{$path}{'location'};
+    if (!defined($find{$path}{'parentId'})) {
+        $find{$path}{'parentId'} = $find{$location}{'id'};
+    }
+
+    $sql_statement = qq(INSERT INTO Items(VolumeID, ItemID, ParentID, ItemType, Name, MimeType, IsContainer, Location, LastWriteTime, SymLinkTargetID, Size) VALUES (?,?,?,?,?,?,?,?,?,0,?));
+    $sth = $dbh->prepare($sql_statement);
+    print "VolumeId: $volumeId, ID: $id, ParentId: $find{$path}{'parentId'}, $find{$path}{'itemType'}, $find{$path}{'filename'}, $find{$path}{'mime'}, $find{$path}{'container'}, $find{$path}{'location'}, $find{$path}{'mtime'}, $find{$path}{'size'}\n";
+    $sth->execute($volumeId, $id, $find{$path}{'parentId'}, $find{$path}{'itemType'}, $find{$path}{'filename'}, $find{$path}{'mime'}, $find{$path}{'container'}, $find{$path}{'location'}, $find{$path}{'mtime'}, $find{$path}{'size'}) or die $DBI::errstr;
+
+    $totalSize = $totalSize + $find{$path}{'size'};
+
+    if ($find{$path}{'container'}) {
+        $nroDirs++;
+    } else {
+        $nroFiles++;
+    }
+
+    $id++;
+}
 
 
+$sql_statement = qq(INSERT INTO Volumes(VolumeID, Title, Added, VolumeType, ArchiveNr, DriveType, Files, Dirs, Size) VALUES (?,?,datetime('now'),0,?,4,?,?,?));
+$sth = $dbh->prepare($sql_statement);
+$sth->execute($volumeId, $label, $nroFiles, $volumeId, $nroDirs, $totalSize) or die $DBI::errstr;
+
+$sql_statement = qq(UPDATE IdCounters SET Count=? WHERE IdFieldname = 'Volumes.VolumeID');
+$sth = $dbh->prepare($sql_statement);
+$sth->execute($volumeId) or die $DBI::errstr;
+
+
+$command = "basenji -d=".$dbfile;
+print "$command\n";
+system($command);
 
 exit(0);
 
@@ -65,45 +183,9 @@ while(my @row = $sth->fetchrow_array()) {
 	}
 }
 
-foreach my $id (keys %titles) {
-	print "Acomodando entradas en el volumen $titles{$id}\n";
-
-
-#	my $sql_statement = qq(SELECT VolumeID, ItemID, Name from Items WHERE VolumeID=$id;);
-#	my $sth = $dbh->prepare($sql_statement);
-#	my $rv = $sth->execute() or die $DBI::errstr;
-#	print $DBI::errstr if($rv < 0);
-#
-#	while(my @row = $sth->fetchrow_array()) {
-#		print "$row[0] $row[1] $row[2]\n";
-#	}
-
-	# Libero el VID que estoy analizando
-	my $sql_statement = qq(UPDATE Items SET VolumeID = 999 WHERE VolumeID=$id;);
-	print "SQL: $sql_statement\n";
-	my $sth = $dbh->prepare($sql_statement);
-#	my $rv = $sth->execute() or die $DBI::errstr;
-#	print $DBI::errstr if($rv < 0);
-
-	# Obtengo el VID que debo actualizar:
-	print "ID a actualizar: $ids{$titles{$id}}\n";
-
-
-#	my $sql_statement = qq(UPDATE Items SET VolumeID = 999 WHERE VolumeID=$id;);
-#	print "SQL: $sql_statement\n";
-#	my $sth = $dbh->prepare($sql_statement);
-#	my $rv = $sth->execute() or die $DBI::errstr;
-#	print $DBI::errstr if($rv < 0);
-
-	
-
-
+$dbh->disconnect();
 
 exit(0);
-	
-}
-
-$dbh->disconnect();
 
 
 sub usage
@@ -113,12 +195,12 @@ sub usage
 
 Usage:
 
-        $0 database directory
+        $0 database directory label
 
 Ex:
-        $0 Music.vdb /dvd
+        $0 Music.vdb /dvd "MP3-678"
 
-        Add /dvd directory content to Music.vdb database
+        Add /dvd directory content to Music.vdb database using label "MP3-678"
 
 END
         exit(0);
